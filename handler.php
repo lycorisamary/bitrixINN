@@ -32,39 +32,6 @@ function logDebug(string $event, array $data = []): void
     @file_put_contents($debugLogFile, json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . PHP_EOL, FILE_APPEND);
 }
 
-function findUserIdCandidatesInArray($data, int $depth = 0, int $maxDepth = 8): array
-{
-    if ($depth > $maxDepth) {
-        return [];
-    }
-    $found = [];
-    if (!is_array($data)) {
-        return [];
-    }
-    foreach ($data as $k => $v) {
-        $keyLower = is_string($k) ? mb_strtolower((string)$k, 'UTF-8') : '';
-        $isUserLikeKey = $keyLower !== '' && (
-            strpos($keyLower, 'user') !== false ||
-            strpos($keyLower, 'currentuser') !== false ||
-            strpos($keyLower, 'current_user') !== false ||
-            strpos($keyLower, 'assignedby') !== false
-        );
-
-        if (is_numeric($v) && $isUserLikeKey) {
-            $id = (int)$v;
-            if ($id > 0 && $id < 100000000) {
-                $found[] = $id;
-            }
-        }
-
-        if (is_array($v)) {
-            $found = array_merge($found, findUserIdCandidatesInArray($v, $depth + 1, $maxDepth));
-        }
-    }
-
-    return array_values(array_unique(array_map('intval', $found)));
-}
-
 logDebug('request_received', [
     'method' => $_SERVER['REQUEST_METHOD'] ?? '',
     'request_keys_sample' => array_slice(array_keys($_REQUEST), 0, 80),
@@ -283,8 +250,6 @@ function extractCurrentUserIdFromRequest(): int
                 'userId',
                 'CURRENT_USER_ID',
                 'currentUserId',
-                'ASSIGNED_BY_ID',
-                'assignedById',
                 'AUTH_USER_ID',
                 'auth_user_id'
             ], array_keys($placementOptions))),
@@ -294,8 +259,6 @@ function extractCurrentUserIdFromRequest(): int
             'userId',
             'CURRENT_USER_ID',
             'currentUserId',
-            'ASSIGNED_BY_ID',
-            'assignedById',
             'AUTH_USER_ID',
             'auth_user_id',
             'authUserId',
@@ -310,26 +273,19 @@ function extractCurrentUserIdFromRequest(): int
             }
         }
 
-        $recursiveCandidates = findUserIdCandidatesInArray($placementOptions);
-        if ($recursiveCandidates !== []) {
-            logDebug('extract.user_from_placement_options_recursive_candidates', [
-                'candidates' => $recursiveCandidates,
-            ]);
-            return $recursiveCandidates[0];
-        }
+        // IMPORTANT:
+        // We intentionally do not recursively scan arbitrary keys here.
+        // Placement payload may contain IDs of responsible users, creators etc.
+        // Using such IDs can incorrectly bind an unrelated employee as observer.
     }
 
     // Fallback to direct request parameters.
-    // `member_id` is a common place where Bitrix24 provides the current portal member.
     $directKeys = [
         'USER_ID',
         'user_id',
         'AUTH_USER_ID',
         'auth_user_id',
-        'USER',
         'userId',
-        'member_id',
-        'memberId',
     ];
     foreach ($directKeys as $key) {
         if (!isset($_REQUEST[$key])) {
