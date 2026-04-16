@@ -304,6 +304,18 @@ function extractCurrentUserIdFromRequest(): int
     return 0;
 }
 
+function extractUserIdFromKnownUrl(string $url): int
+{
+    if ($url === '') {
+        return 0;
+    }
+    if (!preg_match('~/company/personal/user/(\d+)/?~', $url, $m)) {
+        return 0;
+    }
+    $id = (int)($m[1] ?? 0);
+    return $id > 0 ? $id : 0;
+}
+
 function ensurePlacementsBound(array $authData, int $timeout, ?string $portalUrl): array
 {
     $baseUrl = buildCurrentBaseUrl();
@@ -503,6 +515,9 @@ $inn = '';
 $observerUserId = (int)($_POST['observer_user_id'] ?? 0);
 if ($observerUserId <= 0) {
     $observerUserId = extractCurrentUserIdFromRequest();
+}
+if ($observerUserId <= 0) {
+    $observerUserId = extractUserIdFromKnownUrl((string)($_SERVER['HTTP_REFERER'] ?? ''));
 }
 if ($observerUserId <= 0 && $useInstallAuthAsAdmin) {
     $userFromRequestAuth = getCurrentUser($userAuthData, $apiTimeout, $portalUrl, true);
@@ -799,15 +814,44 @@ if ($authData !== [] && isset($_GET['bind_tabs']) && (string)$_GET['bind_tabs'] 
         if (!input) {
             return;
         }
+        function idFromUrl(url) {
+            if (!url) {
+                return '';
+            }
+            var m = String(url).match(/\/company\/personal\/user\/(\d+)\/?/i);
+            return m && m[1] ? String(m[1]) : '';
+        }
+        function setIfValid(id) {
+            if (!id) {
+                return false;
+            }
+            if (!/^\d+$/.test(String(id))) {
+                return false;
+            }
+            input.value = String(id);
+            return true;
+        }
+
+        // Priority #1: current portal URL (as requested: /company/personal/user/{ID}/).
+        var fromTop = '';
+        try {
+            fromTop = idFromUrl(window.top && window.top.location ? window.top.location.href : '');
+        } catch (e) {
+            fromTop = '';
+        }
+        var fromSelf = idFromUrl(window.location.href);
+        if (setIfValid(fromTop) || setIfValid(fromSelf)) {
+            return;
+        }
+
+        // Priority #2: Bitrix24 JS API user.current.
         if (window.BX24 && typeof BX24.init === 'function') {
             BX24.init(function () {
                 BX24.callMethod('user.current', {}, function (result) {
                     if (result && typeof result.error !== 'function') {
                         var data = result.data && result.data();
                         var id = data && data.ID ? String(data.ID) : '';
-                        if (id) {
-                            input.value = id;
-                        }
+                        setIfValid(id);
                     }
                 });
             });
