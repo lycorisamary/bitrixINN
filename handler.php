@@ -545,6 +545,13 @@ function addObserverToCompany(int $companyId, int $userId, array $authData, int 
 
 $inn = '';
 $observerUserId = (int)($_POST['observer_user_id'] ?? 0);
+if ($observerUserId <= 0) {
+    $observerUserId = extractCurrentUserIdFromRequest();
+}
+if ($observerUserId <= 0 && $useInstallAuthAsAdmin) {
+    $userFromRequestAuth = getCurrentUser($userAuthData, $apiTimeout, $portalUrl, true);
+    $observerUserId = (int)($userFromRequestAuth['ID'] ?? 0);
+}
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errors === []) {
     $inn = normalizeInn((string)($_POST['inn'] ?? ''));
     if (!preg_match('/^\d{10}(\d{2})?$/', $inn)) {
@@ -586,6 +593,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errors === []) {
 
                 $successes[] = 'Найдено компаний: ' . count($companies);
 
+                if ($observerUserId <= 0) {
+                    $errors[] = 'Не удалось определить ID текущего пользователя Bitrix24. Откройте приложение внутри портала и попробуйте снова.';
+                }
+
                 if ($observerUserId > 0) {
                     $added = 0;
                     $already = 0;
@@ -613,6 +624,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errors === []) {
                         }
                     }
 
+                    $successes[] = 'ID наблюдателя: ' . $observerUserId;
                     $successes[] = 'Добавлено в наблюдатели: ' . $added;
                     $successes[] = 'Уже был наблюдателем: ' . $already;
                     if ($failed > 0) {
@@ -621,8 +633,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errors === []) {
                             $errors[] = $item;
                         }
                     }
-                } else {
-                    $successes[] = 'Введите Bitrix24 ID сотрудника-наблюдателя ниже и нажмите кнопку.';
                 }
 
                 $resultInfo = [
@@ -767,10 +777,11 @@ if ($authData !== [] && isset($_GET['bind_tabs']) && (string)$_GET['bind_tabs'] 
     <div class="card">
         <h1>Поиск компаний по ИНН</h1>
         <div class="meta">
-            Приложение найдет компании по ИНН, а затем вы вручную укажете Bitrix24 ID пользователя-наблюдателя.
+            Приложение ищет компании по ИНН от имени администратора и автоматически добавляет текущего пользователя в наблюдатели.
         </div>
 
         <form method="post" id="inn-form">
+            <input type="hidden" name="observer_user_id" id="observer_user_id_hidden" value="<?= h($observerUserId > 0 ? (string)$observerUserId : '') ?>">
             <input
                 type="text"
                 name="inn"
@@ -782,9 +793,9 @@ if ($authData !== [] && isset($_GET['bind_tabs']) && (string)$_GET['bind_tabs'] 
                 value="<?= h($inn) ?>"
                 required
             >
-            <button type="submit" id="submit-btn">Найти компании</button>
+            <button type="submit" id="submit-btn">Найти и привязать</button>
         </form>
-        <div class="small">После поиска появится поле для выбора сотрудника-наблюдателя (введите его Bitrix24 ID).</div>
+        <div class="small">ID пользователя определяется автоматически через Bitrix24 JS API (<code>user.current</code>).</div>
         <div class="small"><a href="?bind_tabs=1">Зарегистрировать вкладки в лидах/сделках/компаниях/контактах</a></div>
 
         <?php foreach ($successes as $msg): ?>
@@ -821,31 +832,31 @@ if ($authData !== [] && isset($_GET['bind_tabs']) && (string)$_GET['bind_tabs'] 
                     <?php endforeach; ?>
                 </ul>
             </div>
-            <div class="result">
-                <div><strong>Выбор сотрудника-наблюдателя</strong></div>
-                <div class="small" style="margin-top:8px;">
-                    Введите Bitrix24 ID пользователя, которого нужно добавить в наблюдатели найденных компаний.
-                </div>
-                <form method="post" id="observer-add-form" style="margin-top:12px;">
-                    <input type="hidden" name="inn" value="<?= h($inn) ?>">
-                    <input
-                        type="text"
-                        name="observer_user_id"
-                        id="observer_user_id"
-                        inputmode="numeric"
-                        autocomplete="off"
-                        maxlength="10"
-                        placeholder="Например, 623"
-                        value="<?= h($observerUserId > 0 ? (string)$observerUserId : '') ?>"
-                        required
-                    >
-                    <button type="submit">Добавить наблюдателя</button>
-                </form>
-            </div>
         <?php endif; ?>
     </div>
 </div>
 
-<!-- no client-side auto-detection; observer user id is entered manually -->
+<script src="https://api.bitrix24.com/api/v1/"></script>
+<script>
+    (function () {
+        var input = document.getElementById('observer_user_id_hidden');
+        if (!input) {
+            return;
+        }
+        if (window.BX24 && typeof BX24.init === 'function') {
+            BX24.init(function () {
+                BX24.callMethod('user.current', {}, function (result) {
+                    if (result && typeof result.error !== 'function') {
+                        var data = result.data && result.data();
+                        var id = data && data.ID ? String(data.ID) : '';
+                        if (id) {
+                            input.value = id;
+                        }
+                    }
+                });
+            });
+        }
+    })();
+</script>
 </body>
 </html>
