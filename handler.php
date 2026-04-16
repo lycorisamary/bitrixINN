@@ -348,6 +348,80 @@ function extractCurrentUserIdFromRequest(): int
     return 0;
 }
 
+function resolveObserverUserId(int $timeout, ?string $portalUrl, bool $useInstallAuthAsAdmin, array $userAuthData): int
+{
+    $requestScopedAuthData = $userAuthData;
+    $requestScopedAuthMap = [
+        'observer_auth_id' => 'AUTH_ID',
+        'observer_refresh_id' => 'REFRESH_ID',
+        'observer_domain' => 'DOMAIN',
+        'observer_protocol' => 'PROTOCOL',
+    ];
+    foreach ($requestScopedAuthMap as $postKey => $authKey) {
+        if (!isset($_POST[$postKey])) {
+            continue;
+        }
+        $value = trim((string)$_POST[$postKey]);
+        if ($value === '') {
+            continue;
+        }
+        $requestScopedAuthData[$authKey] = $value;
+    }
+
+    if (!empty($requestScopedAuthData['AUTH_ID']) && !empty($requestScopedAuthData['DOMAIN'])) {
+        $userFromPostedAuth = getCurrentUser($requestScopedAuthData, $timeout, $portalUrl, false);
+        $observerUserIdFromAuth = (int)($userFromPostedAuth['ID'] ?? 0);
+        if ($observerUserIdFromAuth > 0) {
+            logDebug('observer.resolve.from_posted_auth', [
+                'observer_user_id' => $observerUserIdFromAuth,
+                'domain' => (string)$requestScopedAuthData['DOMAIN'],
+            ]);
+            return $observerUserIdFromAuth;
+        }
+
+        logDebug('observer.resolve.posted_auth_failed', [
+            'domain' => (string)($requestScopedAuthData['DOMAIN'] ?? ''),
+            'error' => (string)($userFromPostedAuth['_error'] ?? ''),
+        ]);
+    }
+
+    $observerUserId = (int)($_POST['observer_user_id'] ?? 0);
+    if ($observerUserId > 0) {
+        logDebug('observer.resolve.from_post', [
+            'observer_user_id' => $observerUserId,
+        ]);
+        return $observerUserId;
+    }
+
+    if (!$useInstallAuthAsAdmin) {
+        $observerUserId = extractCurrentUserIdFromRequest();
+        if ($observerUserId > 0) {
+            logDebug('observer.resolve.from_request_context', [
+                'observer_user_id' => $observerUserId,
+            ]);
+            return $observerUserId;
+        }
+    }
+
+    if ($useInstallAuthAsAdmin) {
+        $userFromRequestAuth = getCurrentUser($userAuthData, $timeout, $portalUrl, true);
+        $observerUserId = (int)($userFromRequestAuth['ID'] ?? 0);
+        if ($observerUserId > 0) {
+            logDebug('observer.resolve.from_user_auth', [
+                'observer_user_id' => $observerUserId,
+            ]);
+            return $observerUserId;
+        }
+    }
+
+    logDebug('observer.resolve.failed', [
+        'post_observer_user_id' => (int)($_POST['observer_user_id'] ?? 0),
+        'request_keys_sample' => array_slice(array_keys($_REQUEST), 0, 80),
+    ]);
+
+    return 0;
+}
+
 function ensurePlacementsBound(array $authData, int $timeout, ?string $portalUrl): array
 {
     $baseUrl = buildCurrentBaseUrl();
@@ -544,14 +618,7 @@ function addObserverToCompany(int $companyId, int $userId, array $authData, int 
 }
 
 $inn = '';
-$observerUserId = (int)($_POST['observer_user_id'] ?? 0);
-if ($observerUserId <= 0) {
-    $observerUserId = extractCurrentUserIdFromRequest();
-}
-if ($observerUserId <= 0 && $useInstallAuthAsAdmin) {
-    $userFromRequestAuth = getCurrentUser($userAuthData, $apiTimeout, $portalUrl, true);
-    $observerUserId = (int)($userFromRequestAuth['ID'] ?? 0);
-}
+$observerUserId = resolveObserverUserId($apiTimeout, $portalUrl, $useInstallAuthAsAdmin, $userAuthData);
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errors === []) {
     $inn = normalizeInn((string)($_POST['inn'] ?? ''));
     if (!preg_match('/^\d{10}(\d{2})?$/', $inn)) {
@@ -782,6 +849,10 @@ if ($authData !== [] && isset($_GET['bind_tabs']) && (string)$_GET['bind_tabs'] 
 
         <form method="post" id="inn-form">
             <input type="hidden" name="observer_user_id" id="observer_user_id_hidden" value="<?= h($observerUserId > 0 ? (string)$observerUserId : '') ?>">
+            <input type="hidden" name="observer_auth_id" id="observer_auth_id_hidden" value="">
+            <input type="hidden" name="observer_refresh_id" id="observer_refresh_id_hidden" value="">
+            <input type="hidden" name="observer_domain" id="observer_domain_hidden" value="">
+            <input type="hidden" name="observer_protocol" id="observer_protocol_hidden" value="">
             <input
                 type="text"
                 name="inn"
@@ -840,22 +911,110 @@ if ($authData !== [] && isset($_GET['bind_tabs']) && (string)$_GET['bind_tabs'] 
 <script>
     (function () {
         var input = document.getElementById('observer_user_id_hidden');
-        if (!input) {
+        var authIdInput = document.getElementById('observer_auth_id_hidden');
+        var refreshIdInput = document.getElementById('observer_refresh_id_hidden');
+        var domainInput = document.getElementById('observer_domain_hidden');
+        var protocolInput = document.getElementById('observer_protocol_hidden');
+        var form = document.getElementById('inn-form');
+        var submitBtn = document.getElementById('submit-btn');
+        var resolving = false;
+
+        if (!input || !authIdInput || !refreshIdInput || !domainInput || !protocolInput || !form) {
             return;
         }
-        if (window.BX24 && typeof BX24.init === 'function') {
+
+        function setSubmittingState(isBusy) {
+            if (!submitBtn) {
+                return;
+            }
+            submitBtn.disabled = isBusy;
+            submitBtn.textContent = isBusy ? 'Определяем пользователя...' : 'Найти и привязать';
+        }
+
+        function fetchCurrentUserContext(callback) {
+            if (!(window.BX24 && typeof BX24.init === 'function')) {
+                callback({
+                    id: '',
+                    authId: '',
+                    refreshId: '',
+                    domain: '',
+                    protocol: ''
+                });
+                return;
+            }
+
             BX24.init(function () {
+                var auth = typeof BX24.getAuth === 'function' ? BX24.getAuth() : null;
                 BX24.callMethod('user.current', {}, function (result) {
-                    if (result && typeof result.error !== 'function') {
-                        var data = result.data && result.data();
-                        var id = data && data.ID ? String(data.ID) : '';
-                        if (id) {
-                            input.value = id;
-                        }
+                    if (!result || typeof result.error === 'function') {
+                        callback({
+                            id: '',
+                            authId: auth && auth.access_token ? String(auth.access_token) : '',
+                            refreshId: auth && auth.refresh_token ? String(auth.refresh_token) : '',
+                            domain: auth && auth.domain ? String(auth.domain) : '',
+                            protocol: 'https'
+                        });
+                        return;
                     }
+
+                    var data = result.data && result.data();
+                    callback({
+                        id: data && data.ID ? String(data.ID) : '',
+                        authId: auth && auth.access_token ? String(auth.access_token) : '',
+                        refreshId: auth && auth.refresh_token ? String(auth.refresh_token) : '',
+                        domain: auth && auth.domain ? String(auth.domain) : '',
+                        protocol: 'https'
+                    });
                 });
             });
         }
+
+        function applyContext(context) {
+            input.value = context.id || '';
+            authIdInput.value = context.authId || '';
+            refreshIdInput.value = context.refreshId || '';
+            domainInput.value = context.domain || '';
+            protocolInput.value = context.protocol || 'https';
+        }
+
+        function hasUsableContext() {
+            return Boolean(
+                (input.value && Number(input.value) > 0) ||
+                (authIdInput.value && domainInput.value)
+            );
+        }
+
+        fetchCurrentUserContext(function (context) {
+            applyContext(context);
+        });
+
+        form.addEventListener('submit', function (event) {
+            if (resolving) {
+                event.preventDefault();
+                return;
+            }
+
+            if (hasUsableContext()) {
+                return;
+            }
+
+            event.preventDefault();
+            resolving = true;
+            setSubmittingState(true);
+
+            fetchCurrentUserContext(function (context) {
+                resolving = false;
+                setSubmittingState(false);
+                applyContext(context);
+
+                if (hasUsableContext()) {
+                    form.requestSubmit();
+                    return;
+                }
+
+                alert('Не удалось определить ID текущего пользователя Bitrix24. Откройте приложение внутри портала и попробуйте снова.');
+            });
+        });
     })();
 </script>
 </body>
